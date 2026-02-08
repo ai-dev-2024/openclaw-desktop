@@ -1,6 +1,6 @@
 [package]
 name = "openclaw-desktop"
-version = "0.0.1"
+version = "0.0.2"
 description = "OpenClaw Desktop - A GUI for OpenClaw AI Assistant"
 authors = ["Muhib"]
 edition = "2021"
