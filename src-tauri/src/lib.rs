@@ -1,28 +1,145 @@
-use std::process::Command;
-use std::net::TcpStream;
-use std::fs;
-use std::path::PathBuf;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-use tauri::{
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{Menu, MenuItem},
-    Manager, Runtime,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs::{self, OpenOptions};
+use std::net::TcpStream;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, Runtime,
+};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const GATEWAY_PORT: u16 = 18789;
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GatewayDiagnostics {
+    pub openclaw_installed: bool,
+    pub gateway_running: bool,
+    pub gateway_port: u16,
+    pub dashboard_url: String,
+    pub openclaw_version: Option<String>,
+    pub profile_name: Option<String>,
+    pub log_path: String,
+    pub error_log_path: String,
+}
+
+fn openclaw_home_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Could not find home directory")?;
+    let openclaw_dir = home.join(".openclaw");
+    if !openclaw_dir.exists() {
+        fs::create_dir_all(&openclaw_dir)
+            .map_err(|e| format!("Failed to create OpenClaw directory: {}", e))?;
+    }
+    Ok(openclaw_dir)
+}
+
+fn gateway_log_paths() -> Result<(PathBuf, PathBuf), String> {
+    let openclaw_dir = openclaw_home_dir()?;
+    Ok((
+        openclaw_dir.join("gateway.log"),
+        openclaw_dir.join("gateway_error.log"),
+    ))
+}
+
+fn openclaw_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", "openclaw"]);
+        cmd
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("openclaw")
+    }
+}
+
+fn run_openclaw_output(args: &[&str]) -> Result<std::process::Output, String> {
+    openclaw_command()
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run openclaw {}: {}", args.join(" "), e))
+}
+
+fn run_openclaw_gateway_control(action: &str) -> Result<String, String> {
+    let output = run_openclaw_output(&["daemon", action])?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            Ok(format!("Gateway {} command sent", action))
+        } else {
+            Ok(stdout)
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!("openclaw gateway {} failed", action))
+        } else {
+            Err(stderr)
+        }
+    }
+}
+
+fn start_gateway_foreground_to_logs() -> Result<(), String> {
+    let (log_path, error_log_path) = gateway_log_paths()?;
+
+    let stdout_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .map_err(|e| format!("Failed to open gateway log file: {}", e))?;
+
+    let stderr_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&error_log_path)
+        .map_err(|e| format!("Failed to open gateway error log file: {}", e))?;
+
+    let mut command = openclaw_command();
+    command
+        .args(["gateway", "--port", &GATEWAY_PORT.to_string(), "--verbose"])
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+
+    #[cfg(target_os = "windows")]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
+        .spawn()
+        .map_err(|e| format!("Failed to start gateway: {}", e))?;
+
+    Ok(())
+}
+
+fn detect_openclaw_version() -> Option<String> {
+    let output = run_openclaw_output(&["--version"]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// Read the gateway token from OpenClaw config file
 fn read_gateway_token() -> Option<String> {
     // Try to find the config file
     let home = dirs::home_dir()?;
     let config_path = home.join(".openclaw").join("openclaw.json");
-    
+
     if !config_path.exists() {
         // Try legacy path
         let legacy_path = home.join(".clawdbot").join("clawdbot.json");
@@ -31,7 +148,7 @@ fn read_gateway_token() -> Option<String> {
         }
         return None;
     }
-    
+
     read_token_from_file(&config_path)
 }
 
@@ -74,46 +191,7 @@ fn start_gateway() -> Result<String, String> {
         return Ok("Gateway is already running".to_string());
     }
 
-    // Run gateway directly with output redirected to log file (no visible CMD window)
-    #[cfg(target_os = "windows")]
-    {
-        let home = dirs::home_dir().ok_or("Could not find home directory")?;
-        let log_path = home.join(".openclaw").join("gateway.log");
-        
-        // Clear the log file
-        let _ = std::fs::write(&log_path, "");
-        
-        // Run gateway directly with output redirected to log file
-        // Using powershell to redirect output properly
-        let cmd = format!(
-            "Start-Process -WindowStyle Hidden -FilePath 'node' -ArgumentList '{} gateway --port {}' -RedirectStandardOutput '{}' -RedirectStandardError '{}'",
-            home.join("AppData\\Roaming\\npm\\node_modules\\openclaw\\dist\\index.js").display(),
-            GATEWAY_PORT,
-            log_path.display(),
-            home.join(".openclaw").join("gateway_error.log").display()
-        );
-        
-        Command::new("powershell")
-            .args(["-WindowStyle", "Hidden", "-Command", &cmd])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("Failed to start gateway: {}", e))?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let home = dirs::home_dir().ok_or("Could not find home directory")?;
-        let log_path = home.join(".openclaw").join("gateway.log");
-        
-        Command::new("sh")
-            .args(["-c", &format!(
-                "nohup openclaw gateway --port {} > '{}' 2>&1 &",
-                GATEWAY_PORT,
-                log_path.display()
-            )])
-            .spawn()
-            .map_err(|e| format!("Failed to start gateway: {}", e))?;
-    }
+    start_gateway_foreground_to_logs()?;
 
     Ok("Gateway starting...".to_string())
 }
@@ -121,48 +199,24 @@ fn start_gateway() -> Result<String, String> {
 /// Stop the OpenClaw gateway
 #[tauri::command]
 fn stop_gateway() -> Result<String, String> {
-    // Use 'openclaw gateway stop' which stops the registered service
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/c", "openclaw", "gateway", "stop"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("Failed to stop gateway: {}", e))?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("sh")
-            .args(["-c", "openclaw gateway stop"])
-            .spawn()
-            .map_err(|e| format!("Failed to stop gateway: {}", e))?;
-    }
-
-    Ok("Gateway stopped".to_string())
+    run_openclaw_gateway_control("stop")
 }
 
 /// Restart the OpenClaw gateway
 #[tauri::command]
 fn restart_gateway() -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/c", "openclaw", "gateway", "restart"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("Failed to restart gateway: {}", e))?;
-    }
+    run_openclaw_gateway_control("restart")
+}
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("sh")
-            .args(["-c", "openclaw gateway restart"])
-            .spawn()
-            .map_err(|e| format!("Failed to restart gateway: {}", e))?;
+/// Auto-start gateway if not already running (called on app launch)
+#[tauri::command]
+fn auto_start_gateway() -> Result<bool, String> {
+    if is_gateway_running() {
+        Ok(false) // already running
+    } else {
+        start_gateway_foreground_to_logs()?;
+        Ok(true) // started
     }
-
-    Ok("Gateway restarting...".to_string())
 }
 
 /// Check if OpenClaw is installed
@@ -170,8 +224,8 @@ fn restart_gateway() -> Result<String, String> {
 fn is_openclaw_installed() -> bool {
     #[cfg(target_os = "windows")]
     {
-        Command::new("where")
-            .arg("openclaw")
+        Command::new("cmd")
+            .args(["/c", "where", "openclaw"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -184,6 +238,47 @@ fn is_openclaw_installed() -> bool {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+}
+
+#[tauri::command]
+fn get_gateway_diagnostics() -> Result<GatewayDiagnostics, String> {
+    let (log_path, error_log_path) = gateway_log_paths()?;
+    Ok(GatewayDiagnostics {
+        openclaw_installed: is_openclaw_installed(),
+        gateway_running: is_gateway_running(),
+        gateway_port: GATEWAY_PORT,
+        dashboard_url: format!("http://127.0.0.1:{}/", GATEWAY_PORT),
+        openclaw_version: detect_openclaw_version(),
+        profile_name: std::env::var("OPENCLAW_PROFILE").ok(),
+        log_path: log_path.display().to_string(),
+        error_log_path: error_log_path.display().to_string(),
+    })
+}
+
+#[tauri::command]
+fn run_openclaw_doctor() -> Result<String, String> {
+    let output = run_openclaw_output(&["doctor"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        if stdout.trim().is_empty() {
+            Ok("OpenClaw doctor finished with no output".to_string())
+        } else {
+            Ok(stdout)
+        }
+    } else {
+        let mut msg = String::from("OpenClaw doctor failed");
+        if !stderr.trim().is_empty() {
+            msg.push_str("\n\n");
+            msg.push_str(stderr.trim());
+        }
+        if !stdout.trim().is_empty() {
+            msg.push_str("\n\n");
+            msg.push_str(stdout.trim());
+        }
+        Err(msg)
     }
 }
 
@@ -202,6 +297,16 @@ async fn install_openclaw() -> Result<String, String> {
     }
 }
 
+/// Get the dashboard URL with auth token for iframe embedding
+#[tauri::command]
+fn get_dashboard_url() -> String {
+    let base_url = format!("http://127.0.0.1:{}/", GATEWAY_PORT);
+    match read_gateway_token() {
+        Some(token) => format!("{}?token={}", base_url, urlencoding::encode(&token)),
+        None => base_url,
+    }
+}
+
 /// Navigate main window to the dashboard
 #[tauri::command]
 async fn open_dashboard_window(app: tauri::AppHandle) -> Result<(), String> {
@@ -213,7 +318,8 @@ async fn open_dashboard_window(app: tauri::AppHandle) -> Result<(), String> {
             Some(token) => format!("{}?token={}", base_url, urlencoding::encode(&token)),
             None => base_url,
         };
-        window.navigate(dashboard_url.parse().unwrap())
+        window
+            .navigate(dashboard_url.parse().unwrap())
             .map_err(|e| format!("Failed to navigate: {}", e))?;
     }
     Ok(())
@@ -224,18 +330,22 @@ async fn open_dashboard_window(app: tauri::AppHandle) -> Result<(), String> {
 fn get_gateway_logs(lines: Option<usize>) -> Result<String, String> {
     let home = dirs::home_dir().ok_or("Could not find home directory")?;
     let log_path = home.join(".openclaw").join("gateway.log");
-    
+
     if !log_path.exists() {
         return Ok("No logs available yet. Start the gateway to see logs.".to_string());
     }
-    
-    let content = fs::read_to_string(&log_path)
-        .map_err(|e| format!("Failed to read log file: {}", e))?;
-    
+
+    let content =
+        fs::read_to_string(&log_path).map_err(|e| format!("Failed to read log file: {}", e))?;
+
     let max_lines = lines.unwrap_or(100);
     let log_lines: Vec<&str> = content.lines().collect();
-    let start = if log_lines.len() > max_lines { log_lines.len() - max_lines } else { 0 };
-    
+    let start = if log_lines.len() > max_lines {
+        log_lines.len() - max_lines
+    } else {
+        0
+    };
+
     Ok(log_lines[start..].join("\n"))
 }
 
@@ -244,27 +354,34 @@ fn get_gateway_logs(lines: Option<usize>) -> Result<String, String> {
 fn clear_gateway_logs() -> Result<(), String> {
     let home = dirs::home_dir().ok_or("Could not find home directory")?;
     let log_path = home.join(".openclaw").join("gateway.log");
-    
+
     if log_path.exists() {
         fs::write(&log_path, "").map_err(|e| format!("Failed to clear logs: {}", e))?;
     }
-    
+
     Ok(())
 }
 
 fn create_tray_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let status = if is_gateway_running() { "🟢 Running" } else { "🔴 Stopped" };
-    
-    let menu = Menu::with_items(app, &[
-        &MenuItem::with_id(app, "status", status, false, None::<&str>)?,
-        &MenuItem::with_id(app, "separator", "─────────", false, None::<&str>)?,
-        &MenuItem::with_id(app, "start", "▶ Start Gateway", true, None::<&str>)?,
-        &MenuItem::with_id(app, "stop", "⏹ Stop Gateway", true, None::<&str>)?,
-        &MenuItem::with_id(app, "dashboard", "🌐 Open Dashboard", true, None::<&str>)?,
-        &MenuItem::with_id(app, "separator2", "─────────", false, None::<&str>)?,
-        &MenuItem::with_id(app, "quit", "✖ Quit", true, None::<&str>)?,
-    ])?;
-    
+    let status = if is_gateway_running() {
+        "🟢 Running"
+    } else {
+        "🔴 Stopped"
+    };
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, "status", status, false, None::<&str>)?,
+            &MenuItem::with_id(app, "separator", "─────────", false, None::<&str>)?,
+            &MenuItem::with_id(app, "start", "▶ Start Gateway", true, None::<&str>)?,
+            &MenuItem::with_id(app, "stop", "⏹ Stop Gateway", true, None::<&str>)?,
+            &MenuItem::with_id(app, "dashboard", "🌐 Open Dashboard", true, None::<&str>)?,
+            &MenuItem::with_id(app, "separator2", "─────────", false, None::<&str>)?,
+            &MenuItem::with_id(app, "quit", "✖ Quit", true, None::<&str>)?,
+        ],
+    )?;
+
     Ok(menu)
 }
 
@@ -273,36 +390,46 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Focus existing window instead of opening a duplicate
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .setup(|app| {
             // Create system tray
             let menu = create_tray_menu(app.handle())?;
-            
+
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "start" => {
-                            let _ = start_gateway();
-                        }
-                        "stop" => {
-                            let _ = stop_gateway();
-                        }
-                        "dashboard" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "start" => {
+                        let _ = start_gateway();
                     }
+                    "stop" => {
+                        let _ = stop_gateway();
+                    }
+                    "dashboard" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
@@ -331,11 +458,15 @@ pub fn run() {
             start_gateway,
             stop_gateway,
             restart_gateway,
+            auto_start_gateway,
+            get_dashboard_url,
             is_openclaw_installed,
             install_openclaw,
             open_dashboard_window,
             get_gateway_logs,
             clear_gateway_logs,
+            get_gateway_diagnostics,
+            run_openclaw_doctor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

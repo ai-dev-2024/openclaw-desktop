@@ -9,6 +9,17 @@ interface GatewayStatus {
   dashboard_url: string;
 }
 
+interface GatewayDiagnostics {
+  openclaw_installed: boolean;
+  gateway_running: boolean;
+  gateway_port: number;
+  dashboard_url: string;
+  openclaw_version: string | null;
+  profile_name: string | null;
+  log_path: string;
+  error_log_path: string;
+}
+
 type Page = "loading" | "setup" | "dashboard";
 
 function App() {
@@ -17,22 +28,76 @@ function App() {
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [startingGateway, setStartingGateway] = useState(false);
-
-  // Track if we've already opened dashboard this session
-  const [dashboardOpened, setDashboardOpened] = useState(false);
+  const [navigatedToDashboard, setNavigatedToDashboard] = useState(false);
 
   // Log panel state
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<string>("");
+  const [diagnostics, setDiagnostics] = useState<GatewayDiagnostics | null>(null);
+  const [runningDoctor, setRunningDoctor] = useState(false);
 
-  // Check status on load and every 3 seconds
+  // Auto-start gateway on first load
   useEffect(() => {
+    async function init() {
+      const isInstalled = await invoke<boolean>("is_openclaw_installed");
+      if (!isInstalled) {
+        setPage("setup");
+        return;
+      }
+
+      setPage("dashboard");
+
+      // Auto-start if not running
+      try {
+        const started = await invoke<boolean>("auto_start_gateway");
+        if (started) {
+          setStartingGateway(true);
+        }
+      } catch (e) {
+        console.error("Auto-start failed:", e);
+      }
+    }
+    init();
+  }, []);
+
+  // Poll status every 3 seconds
+  useEffect(() => {
+    if (page !== "dashboard") return;
+
+    async function checkStatus() {
+      try {
+        const gatewayStatus = await invoke<GatewayStatus>("get_gateway_status");
+        setStatus(gatewayStatus);
+
+        if (gatewayStatus.running) {
+          setStartingGateway(false);
+
+          // Navigate the entire webview to the dashboard (bypasses X-Frame-Options)
+          if (!navigatedToDashboard) {
+            setNavigatedToDashboard(true);
+            try {
+              await invoke("open_dashboard_window");
+            } catch (e) {
+              console.error("Failed to navigate to dashboard:", e);
+            }
+          }
+        } else {
+          // Gateway stopped — reset so we re-navigate when it comes back
+          if (navigatedToDashboard) {
+            setNavigatedToDashboard(false);
+          }
+        }
+      } catch (e) {
+        console.error("Status check failed:", e);
+      }
+    }
+
     checkStatus();
     const interval = setInterval(checkStatus, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [page, navigatedToDashboard]);
 
-  // Poll logs when log panel is open
+  // Poll logs when panel is open
   useEffect(() => {
     if (!showLogs) return;
 
@@ -46,34 +111,32 @@ function App() {
     }
 
     fetchLogs();
+    fetchDiagnostics();
     const interval = setInterval(fetchLogs, 1000);
     return () => clearInterval(interval);
   }, [showLogs]);
 
-  async function checkStatus() {
+  async function fetchDiagnostics() {
     try {
-      const isInstalled = await invoke<boolean>("is_openclaw_installed");
-      if (!isInstalled) {
-        setPage("setup");
-        return;
-      }
-
-      const gatewayStatus = await invoke<GatewayStatus>("get_gateway_status");
-      setStatus(gatewayStatus);
-      setPage("dashboard");
-
-      // Auto-open dashboard if gateway is running and we haven't opened it yet
-      if (gatewayStatus.running && !dashboardOpened) {
-        setDashboardOpened(true);
-        setStartingGateway(false);
-        // Auto-open the dashboard window
-        await invoke("open_dashboard_window");
-      } else if (gatewayStatus.running) {
-        setStartingGateway(false);
-      }
+      const data = await invoke<GatewayDiagnostics>("get_gateway_diagnostics");
+      setDiagnostics(data);
     } catch (e) {
-      console.error("Status check failed:", e);
-      setPage("dashboard");
+      console.error("Failed to fetch diagnostics:", e);
+    }
+  }
+
+  async function runDoctor() {
+    if (runningDoctor) return;
+    setRunningDoctor(true);
+    try {
+      const output = await invoke<string>("run_openclaw_doctor");
+      setLogs((prev) => `${prev}\n\n===== openclaw doctor =====\n${output}`.trim());
+    } catch (e) {
+      console.error("OpenClaw doctor failed:", e);
+      setLogs((prev) => `${prev}\n\n===== openclaw doctor (failed) =====\n${String(e)}`.trim());
+    } finally {
+      setRunningDoctor(false);
+      fetchDiagnostics();
     }
   }
 
@@ -82,7 +145,12 @@ function App() {
     setError(null);
     try {
       await invoke("install_openclaw");
-      await checkStatus();
+      setPage("dashboard");
+      // Auto-start after install
+      try {
+        await invoke<boolean>("auto_start_gateway");
+        setStartingGateway(true);
+      } catch (_) { /* ignore */ }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -95,40 +163,29 @@ function App() {
     setStartingGateway(true);
     try {
       await invoke("start_gateway");
-      // Keep checking status
-      setTimeout(checkStatus, 2000);
     } catch (e) {
       console.error("Failed to start gateway:", e);
       setStartingGateway(false);
     }
   }
 
-  async function handleStopGateway() {
-    try {
-      await invoke("stop_gateway");
-      setTimeout(checkStatus, 1000);
-    } catch (e) {
-      console.error("Failed to stop gateway:", e);
-    }
-  }
-
   async function handleRestartGateway() {
     try {
       await invoke("restart_gateway");
-      // Reset dashboard opened so it re-opens after restart
-      setDashboardOpened(false);
-      setTimeout(checkStatus, 3000);
+      setNavigatedToDashboard(false);
+      setStartingGateway(true);
     } catch (e) {
       console.error("Failed to restart gateway:", e);
     }
   }
 
-  async function openKofi() {
-    await openUrl("https://ko-fi.com/ai_dev_2024");
+  async function openInBrowser() {
+    const url = await invoke<string>("get_dashboard_url");
+    await openUrl(url);
   }
 
-  async function openDashboard() {
-    await invoke("open_dashboard_window");
+  async function openKofi() {
+    await openUrl("https://ko-fi.com/ai_dev_2024");
   }
 
   // Loading screen
@@ -184,14 +241,18 @@ function App() {
     );
   }
 
-  // Dashboard view - Gateway running or stopped
+  // Dashboard view — when gateway starts, this navigates to the dashboard automatically
+  // The React UI is only shown while gateway is stopped or starting
   return (
     <main className="container dashboard">
-      {/* Status Bar */}
+      {/* Header Bar (visible until dashboard takes over) */}
       <header className="status-bar">
         <div className="status-left">
           <span className="logo-small">🦞</span>
           <span className="app-title">OpenClaw Desktop</span>
+          {diagnostics?.openclaw_version && (
+            <span className="version-badge">v{diagnostics.openclaw_version}</span>
+          )}
         </div>
 
         <div className="status-center">
@@ -214,19 +275,15 @@ function App() {
               <button className="control-btn restart" onClick={handleRestartGateway} title="Restart Gateway">
                 🔄 Restart
               </button>
-              <button className="control-btn stop" onClick={handleStopGateway}>
-                ⏹ Stop
+              <button
+                className="control-btn icon-btn"
+                onClick={openInBrowser}
+                title="Open in Browser"
+              >
+                🔗
               </button>
             </>
           )}
-          <button
-            className="control-btn dashboard-btn"
-            onClick={openDashboard}
-            disabled={!status?.running}
-            title="Open Dashboard"
-          >
-            🌐 Dashboard
-          </button>
           <button
             className={`control-btn logs-btn ${showLogs ? "active" : ""}`}
             onClick={() => setShowLogs(!showLogs)}
@@ -240,53 +297,8 @@ function App() {
         </div>
       </header>
 
-      {/* Log Panel */}
-      {showLogs && (
-        <div className="log-panel">
-          <div className="log-header">
-            <span>📋 Gateway Logs</span>
-            <button
-              className="log-close-btn"
-              onClick={() => setShowLogs(false)}
-              title="Close logs"
-            >
-              ✕
-            </button>
-          </div>
-          <pre className="log-content">{logs || "No logs available yet..."}</pre>
-        </div>
-      )}
-
-      {/* Main Content */}
-      {status?.running ? (
-        <div className="gateway-running">
-          <div className="running-content">
-            <span className="running-emoji">🦞</span>
-            <h2>Gateway is Running</h2>
-            <p>Your OpenClaw gateway is active and ready to use.</p>
-
-            <div className="dashboard-info">
-              <p className="dashboard-url">
-                <strong>Dashboard:</strong> <a href="#" onClick={(e) => { e.preventDefault(); openDashboard(); }}>http://127.0.0.1:18789/</a>
-              </p>
-              <p className="info-note">
-                ℹ️ The OpenClaw dashboard opens in your browser for security reasons.
-              </p>
-            </div>
-
-            <button className="primary-btn large" onClick={openDashboard}>
-              🌐 Open Dashboard
-            </button>
-          </div>
-
-          <div className="support-section">
-            <p>Enjoying OpenClaw Desktop?</p>
-            <button className="support-btn" onClick={openKofi}>
-              ☕ Buy me a coffee on Ko-fi
-            </button>
-          </div>
-        </div>
-      ) : (
+      {/* Gateway Offline / Starting view */}
+      {!status?.running && (
         <div className="gateway-offline">
           <span className="offline-emoji">🦞</span>
           <h2>{startingGateway ? "Starting Gateway..." : "Gateway is not running"}</h2>
@@ -303,6 +315,46 @@ function App() {
               ☕ Buy me a coffee on Ko-fi
             </button>
           </div>
+        </div>
+      )}
+
+      {/* When running, show a brief "navigating..." message before dashboard takes over */}
+      {status?.running && !navigatedToDashboard && (
+        <div className="gateway-offline">
+          <span className="loading-spinner">🦞</span>
+          <p className="loading-text">Loading Dashboard...</p>
+        </div>
+      )}
+
+      {/* Log Panel */}
+      {showLogs && (
+        <div className="log-panel">
+          <div className="log-header">
+            <span>📋 Gateway Logs</span>
+            <div className="log-actions">
+              <button className="log-tool-btn" onClick={fetchDiagnostics} title="Refresh diagnostics">
+                Refresh
+              </button>
+              <button className="log-tool-btn" onClick={runDoctor} disabled={runningDoctor} title="Run openclaw doctor">
+                {runningDoctor ? "Running..." : "Run Doctor"}
+              </button>
+              <button
+                className="log-close-btn"
+                onClick={() => setShowLogs(false)}
+                title="Close logs"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+          {diagnostics && (
+            <div className="diagnostics-row">
+              <span>OpenClaw: {diagnostics.openclaw_installed ? (diagnostics.openclaw_version || "Installed") : "Not installed"}</span>
+              <span>Gateway: {diagnostics.gateway_running ? "Running" : "Stopped"}</span>
+              <span>Port: {diagnostics.gateway_port}</span>
+            </div>
+          )}
+          <pre className="log-content">{logs || "No logs available yet..."}</pre>
         </div>
       )}
     </main>

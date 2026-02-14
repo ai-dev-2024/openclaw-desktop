@@ -1,4 +1,4 @@
-/* OpenClaw Desktop Styles */
+/* OpenClaw Desktop Styles - v0.1.0 */
 :root {
   --bg-primary: #0a0a0f;
   --bg-secondary: #13131a;
@@ -62,15 +62,13 @@ body {
 }
 
 @keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
 
-  0%,
-  100% {
-    transform: scale(1);
-  }
-
-  50% {
-    transform: scale(1.05);
-  }
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
 .loading-text {
@@ -79,15 +77,8 @@ body {
 }
 
 @keyframes fade {
-
-  0%,
-  100% {
-    opacity: 0.5;
-  }
-
-  50% {
-    opacity: 1;
-  }
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
 }
 
 /* Setup Wizard */
@@ -215,10 +206,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.5rem 1rem;
+  padding: 0.4rem 1rem;
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
-  min-height: 50px;
+  min-height: 44px;
+  flex-shrink: 0;
 }
 
 .status-left {
@@ -228,12 +220,21 @@ body {
 }
 
 .logo-small {
-  font-size: 1.5rem;
+  font-size: 1.3rem;
 }
 
 .app-title {
   font-weight: 600;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
+}
+
+.version-badge {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem 0.4rem;
 }
 
 .status-center {
@@ -243,7 +244,7 @@ body {
 }
 
 .status-indicator {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 500;
 }
 
@@ -255,19 +256,23 @@ body {
   color: var(--danger);
 }
 
+.status-indicator.starting {
+  color: #eab308;
+}
+
 .status-right {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .control-btn {
-  padding: 0.4rem 0.8rem;
+  padding: 0.35rem 0.7rem;
   border: none;
   border-radius: 6px;
   cursor: pointer;
   font-weight: 500;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   transition: all 0.2s ease;
 }
 
@@ -286,10 +291,17 @@ body {
   color: white;
 }
 
-.control-btn.external {
+.control-btn.icon-btn {
   background: var(--bg-tertiary);
-  color: var(--text-primary);
+  color: var(--text-secondary);
   border: 1px solid var(--border);
+  padding: 0.35rem 0.55rem;
+  font-size: 0.85rem;
+}
+
+.control-btn.icon-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 .control-btn:hover {
@@ -297,12 +309,50 @@ body {
   transform: scale(1.05);
 }
 
-/* Dashboard iframe */
-.dashboard-frame {
+/* Embedded Dashboard */
+.dashboard-embed {
   flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.iframe-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  background: var(--bg-primary);
+  z-index: 5;
+}
+
+.loading-spinner {
+  font-size: 48px;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.iframe-loading p {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  animation: fade 1.5s ease-in-out infinite;
+}
+
+.dashboard-frame {
   width: 100%;
+  height: 100%;
   border: none;
   background: var(--bg-primary);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.dashboard-frame.loaded {
+  opacity: 1;
 }
 
 /* Gateway Offline */
@@ -339,92 +389,7 @@ body {
   margin-bottom: 0.75rem;
 }
 
-/* Gateway Running View */
-.gateway-running {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1rem;
-  padding: 2rem;
-  background: linear-gradient(180deg, var(--bg-primary) 0%, rgba(34, 197, 94, 0.05) 100%);
-}
-
-.running-content {
-  text-align: center;
-  max-width: 500px;
-}
-
-.running-emoji {
-  font-size: 80px;
-  display: block;
-  margin-bottom: 1rem;
-  animation: pulse 2s ease-in-out infinite;
-}
-
-.gateway-running h2 {
-  color: var(--success);
-  font-size: 1.8rem;
-  margin-bottom: 0.5rem;
-}
-
-.gateway-running p {
-  color: var(--text-secondary);
-  margin-bottom: 1rem;
-}
-
-.dashboard-info {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1.5rem;
-  margin: 1.5rem 0;
-}
-
-.dashboard-url {
-  font-size: 0.95rem;
-  color: var(--text-primary);
-}
-
-.dashboard-url a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
-.dashboard-url a:hover {
-  text-decoration: underline;
-}
-
-.info-note {
-  font-size: 0.85rem !important;
-  color: var(--text-secondary) !important;
-  margin-top: 0.75rem;
-  opacity: 0.8;
-}
-
-.primary-btn.large {
-  max-width: 300px;
-  margin: 0 auto;
-}
-
-/* Dashboard button in header */
-.control-btn.dashboard-btn {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-}
-
-.control-btn.dashboard-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.status-indicator.starting {
-  color: #eab308;
-}
-
-/* Log Panel Styles */
+/* Log Panel */
 .log-panel {
   background: var(--bg-secondary);
   border-top: 1px solid var(--border);
@@ -443,6 +408,33 @@ body {
   border-bottom: 1px solid var(--border);
   font-weight: 600;
   font-size: 0.9rem;
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.log-tool-btn {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.log-tool-btn:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.log-tool-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .log-close-btn {
@@ -470,6 +462,17 @@ body {
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
+}
+
+.diagnostics-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 0.45rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
 }
 
 .log-content::-webkit-scrollbar {

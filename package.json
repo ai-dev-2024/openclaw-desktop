@@ -1,10 +1,10 @@
 {
   "name": "openclaw-desktop",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.1.0",
   "type": "module",
   "description": "A beautiful desktop application for OpenClaw AI assistant",
-  "author": "Muhib",
+  "author": "ai-dev-2024",
   "license": "MIT",
   "repository": {
     "type": "git",
